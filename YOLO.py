@@ -33,8 +33,6 @@ class YOLONET(object):
             [np.arange(self.cell_size)] * self.cell_size * self.num_bbox),
             (self.num_bbox, self.cell_size, self.cell_size)), (1, 2, 0))
 
-        print(self.offset)
-
         self.images = tf.placeholder(tf.float32, shape=[self.batch_size, self.img_size, self.img_size, 3])
         self.logits = self._buildnet(self.images, self.num_output, is_training, keep_prob=0.5)
 
@@ -95,10 +93,6 @@ class YOLONET(object):
 
     def _loss_layer(self, predicts, labels):
 
-         #predicts：Yolo网络的输出 形状[None,1470]
-         #0：7*7*20：表示预测类别
-         #7*7*20:7*7*20 + 7*7*2:表示预测置信度，即预测的边界框与实际边界框之间的IOU
-         #7*7*20 + 7*7*2：1470：预测边界框    目标中心是相对于当前格子的，宽度和高度的开根号是相对当前整张图像的(归一化的)
 
         predict_classes = tf.reshape(predicts[:, :self.boundary1], [self.batch_size,self.cell_size, self.cell_size, 20])
 
@@ -109,32 +103,33 @@ class YOLONET(object):
                                     [self.batch_size,self.cell_size, self.cell_size, self.num_bbox, 4])
 
 
-        response = tf.reshape(labels[:, :, :, 0], [self.batch_size,self.cell_size, self.cell_size, 1]) #Objectがあるかどうか
-        boxes = tf.reshape(labels[:, :, :, 1:5], [self.batch_size,self.cell_size, self.cell_size, 1, 4]) #gt_labels の　[x_ctr, y_Ctr, Width, height]
-        boxes = tf.tile(boxes, [1, 1, 1, self.num_bbox, 1] )#gt_labels をコピーする
+        response = tf.reshape(labels[:, :, :, 0], [self.batch_size,self.cell_size, self.cell_size, 1])
+        boxes = tf.reshape(labels[:, :, :, 1:5], [self.batch_size,self.cell_size, self.cell_size, 1, 4])
+        boxes = tf.tile(boxes, [1, 1, 1, self.num_bbox, 1] )
         classes = labels[:, :, :, 5: ]
 
-        #predict_boxes_tran：offset变量用于把预测边界框predict_boxes中的坐标中心(x,y)由相对当前格子转换为相对当前整个图片
+
         offset = tf.reshape(
                 tf.constant(self.offset, dtype=tf.float32),
                 [1, self.cell_size, self.cell_size, self.num_bbox])
-        #shape为[45,7,7,2]
+
         offset = tf.tile(offset, [self.batch_size, 1, 1, 1])
-        #shape为[45,7,7,2]  如果忽略axis=0 第i行为[[i,i],[i,i],[i,i],[i,i],[i,i],[i,i],[i,i]]
         offset_tran = tf.transpose(offset, (0, 2, 1, 3))
-        #shape为[45,7,7,2,4]  计算每个格子中的预测边界框坐标(x,y)相对于整个图片的位置  而不是相对当前格子
-        #假设当前格子为(3,3)，当前格子的预测边界框为(x0,y0)，则计算坐标(x,y) = ((x0,y0)+(3,3))/7
 
-
-        predict_boxes_tran = tf.stack([(predict_boxes[:, :, :, :, 0] + offset) / self.cell_size, #x_ctr / self.img_size
-                                       (predict_boxes[:, :, :, :, 1] + offset_tran) /self.cell_size, #y_ctr / self.img_size
+        predict_boxes_tran = tf.stack([(predict_boxes[:, :, :, :, 0] + offset) / self.cell_size, #x_ctr
+                                       (predict_boxes[:, :, :, :, 1] + offset_tran) /self.cell_size, #y_ctr
                                        tf.square(predict_boxes[:, :, :, :, 2]), #width)
                                        tf.square(predict_boxes[:, :, :, :, 3])], axis=-1) #height
 
 
         iou_predict_truth = self._cal_iou(predict_boxes_tran, boxes)
-        object_mask = tf.reduce_max(iou_predict_truth, 3, keep_dims=True)
-        object_mask = tf.cast((iou_predict_truth >= object_mask), tf.float32) * response #is 1 when there is an object in the cell i, else 0.
+        print(iou_predict_truth)
+        object_mask = tf.reduce_max(iou_predict_truth, 3, keepdims=True)
+        # the return of (iou_predict_truth >= object_mask) is ture and flase
+        # Use tf.cast change tf.bool into tf.float32, if True = 1.0, if False = 0.0
+        # if use first predict bbox to predict it will be [1, 0], if use second predict box it will be [0, 1]
+        # with nothing in predict box is going to be [0, 0]
+        object_mask = tf.cast((iou_predict_truth >= object_mask), tf.float32) * response
 
         no_object_mask = tf.ones_like(object_mask, dtype=tf.float32) - object_mask # is 1 when there is no object in the cell i, else 0.
 
@@ -153,7 +148,6 @@ class YOLONET(object):
         no_object_delta = no_object_mask*predict_scales
         no_object_loss = tf.reduce_mean(tf.reduce_sum(tf.square(no_object_delta), axis=[1, 2, 3]), name='no_ojbect_loss') * 0.5
 
-        #類別予測
         class_delta = response * (predict_classes - classes)
         class_loss = tf.reduce_mean(tf.reduce_sum(tf.square(class_delta), axis=[1, 2, 3]), name='class_loss')
 
@@ -161,10 +155,10 @@ class YOLONET(object):
     def _cal_iou(self, boxes1, boxes2, scope='iou'):
 
         with tf.variable_scope(scope) as scope:
-            boxes1_t = tf.stack([boxes1[..., 0] - boxes1[..., 2] / 2.0,   #左上角x
-                                 boxes1[..., 1] - boxes1[..., 3] / 2.0,   #左上角y
-                                 boxes1[..., 0] + boxes1[..., 2] / 2.0,   #右下角x
-                                 boxes1[..., 1] + boxes1[..., 3] / 2.0],  #右下角y
+            boxes1_t = tf.stack([boxes1[..., 0] - boxes1[..., 2] / 2.0,
+                                 boxes1[..., 1] - boxes1[..., 3] / 2.0,
+                                 boxes1[..., 0] + boxes1[..., 2] / 2.0,
+                                 boxes1[..., 1] + boxes1[..., 3] / 2.0],
                                  axis=-1)
 
             boxes2_t = tf.stack([boxes2[..., 0] - boxes2[..., 2] / 2.0,
